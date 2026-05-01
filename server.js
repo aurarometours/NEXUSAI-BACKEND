@@ -43,14 +43,13 @@ app.use(
       if (!origin || allowedOrigins === "*" || allowedOrigins.includes(origin)) {
         return cb(null, true);
       }
-
       return cb(null, true);
     },
     credentials: true,
   })
 );
 
-app.use(express.json({ limit: "3mb" }));
+app.use(express.json({ limit: "5mb" }));
 app.use(morgan("tiny"));
 
 const pool = new Pool({
@@ -77,11 +76,31 @@ async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS conversations (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      user_id UUID REFERENCES users(id) ON DELETE CASCADE,
       title TEXT NOT NULL DEFAULT 'Nuova chat',
       created_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW()
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE conversations
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+  `);
+
+  await pool.query(`
+    ALTER TABLE conversations
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+  `);
+
+  await pool.query(`
+    ALTER TABLE conversations
+    ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE CASCADE;
+  `);
+
+  await pool.query(`
+    ALTER TABLE conversations
+    ADD COLUMN IF NOT EXISTS title TEXT DEFAULT 'Nuova chat';
   `);
 
   await pool.query(`
@@ -97,12 +116,32 @@ async function initDb() {
   `);
 
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_conversations_user 
+    ALTER TABLE messages
+    ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE CASCADE;
+  `);
+
+  await pool.query(`
+    ALTER TABLE messages
+    ADD COLUMN IF NOT EXISTS conversation_id UUID REFERENCES conversations(id) ON DELETE CASCADE;
+  `);
+
+  await pool.query(`
+    ALTER TABLE messages
+    ADD COLUMN IF NOT EXISTS artifact JSONB;
+  `);
+
+  await pool.query(`
+    ALTER TABLE messages
+    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_conversations_user
     ON conversations(user_id, updated_at DESC);
   `);
 
   await pool.query(`
-    CREATE INDEX IF NOT EXISTS idx_messages_conversation 
+    CREATE INDEX IF NOT EXISTS idx_messages_conversation
     ON messages(conversation_id, created_at ASC);
   `);
 
@@ -143,9 +182,9 @@ async function auth(req, res, next) {
     req.user = rows[0];
     next();
   } catch {
-    return res
-      .status(401)
-      .json({ message: "Sessione scaduta. Accedi di nuovo." });
+    return res.status(401).json({
+      message: "Sessione scaduta. Accedi di nuovo.",
+    });
   }
 }
 
@@ -165,10 +204,6 @@ function publicChatError(res) {
   });
 }
 
-/* =========================
-   NEXUS MODES
-========================= */
-
 function detectMode(message) {
   const text = String(message || "").toLowerCase();
 
@@ -178,7 +213,9 @@ function detectMode(message) {
     text.includes("html") ||
     text.includes("pagina") ||
     text.includes("codice") ||
-    text.includes("scaricabile")
+    text.includes("scaricabile") ||
+    text.includes("download") ||
+    text.includes("file")
   ) {
     return "landing";
   }
@@ -275,14 +312,6 @@ PROCESSO INTERNO DA SEGUIRE PRIMA DI RISPONDERE:
 - verifica che il brand sia corretto
 
 Non spiegare questo processo all'utente. Produci direttamente.
-
-REGOLA CRITICA FILE:
-Quando generi HTML, non devi spiegare il codice.
-Devi produrre un file completo e chiuso correttamente.
-Il file deve iniziare con <!doctype html> e terminare con </html>.
-Non interrompere il codice.
-Non lasciare CSS, sezioni o tag incompleti.
-Non usare markdown fuori dal blocco HTML.
 `;
 
   const modes = {
@@ -295,10 +324,22 @@ Devi comportarti come:
 - frontend developer
 - brand strategist
 
+REGOLA CRITICA FILE:
+Quando generi HTML, non devi spiegare il codice.
+Devi produrre un file completo e chiuso correttamente.
+Il file deve iniziare con <!doctype html> e terminare con </html>.
+Non interrompere il codice.
+Non lasciare CSS, sezioni o tag incompleti.
+Non usare markdown fuori dal blocco HTML.
+Non generare solo copy o scalette se viene chiesto HTML.
+Non inserire "continua" o testo tagliato.
+
 Quando l'utente chiede una landing, sito, pagina, HTML, file scaricabile o codice:
 DEVI generare un file HTML completo in un unico blocco:
 \`\`\`html
+<!doctype html>
 ...
+</html>
 \`\`\`
 
 Il file deve includere:
@@ -329,6 +370,7 @@ QUALITÀ DESIGN:
 
 SE AURA ROME TOURS / AURAROMETOURS:
 Il risultato deve parlare di:
+- Aura Rome Tours
 - tour privati in golf cart a Roma
 - esperienza elegante, privata, confortevole
 - clienti internazionali
@@ -474,48 +516,51 @@ function wantsArtifact(message, mode) {
 }
 
 function extractArtifact(text) {
-  const html = text.match(/```html\s*([\s\S]*?)```/i);
+  let content = null;
 
-  if (html && html[1].trim().length > 100) {
-    return {
-      filename: "nexus-output.html",
-      mime: "text/html;charset=utf-8",
-      content: html[1].trim(),
-    };
+  const fenced = text.match(/```html\s*([\s\S]*?)```/i);
+  if (fenced) content = fenced[1].trim();
+
+  if (!content) {
+    const start = text.search(/<!doctype html|<html/i);
+    if (start !== -1) {
+      content = text.slice(start).trim();
+    }
   }
 
-  const genericCode = text.match(/```(?:[a-zA-Z0-9_-]+)?\s*([\s\S]*?)```/);
+  if (!content) return null;
 
-  if (
-    genericCode &&
-    genericCode[1].trim().length > 100 &&
-    genericCode[1].includes("<")
-  ) {
-    return {
-      filename: "nexus-output.html",
-      mime: "text/html;charset=utf-8",
-      content: genericCode[1].trim(),
-    };
+  const lower = content.toLowerCase();
+
+  const looksComplete =
+    lower.includes("<html") &&
+    lower.includes("</html>") &&
+    lower.includes("<head") &&
+    lower.includes("</head>") &&
+    lower.includes("<body") &&
+    lower.includes("</body>") &&
+    lower.includes("<style") &&
+    lower.includes("</style>");
+
+  if (!looksComplete) return null;
+
+  return {
+    filename: "nexus-landing.html",
+    mime: "text/html;charset=utf-8",
+    content,
+  };
+}
+
+function stripCodeBlock(text, artifact) {
+  if (artifact) {
+    return "Ho creato il file HTML completo. Puoi scaricarlo dalla card qui sotto.";
   }
 
-  return null;
+  return String(text || "")
+    .replace(/```html\s*([\s\S]*?)```/i, "")
+    .replace(/```(?:[a-zA-Z0-9_-]+)?\s*([\s\S]*?)```/i, "")
+    .trim();
 }
-
-function stripCodeBlock(text) {
-  return text
-    .replace(
-      /```html\s*([\s\S]*?)```/i,
-      "Ho creato il file HTML completo. Puoi scaricarlo dalla card qui sotto."
-    )
-    .replace(
-      /```(?:[a-zA-Z0-9_-]+)?\s*([\s\S]*?)```/i,
-      "Ho preparato il file completo. Puoi scaricarlo dalla card qui sotto."
-    );
-}
-
-/* =========================
-   ROUTES
-========================= */
 
 app.get("/health", (req, res) => {
   res.json({
@@ -524,7 +569,6 @@ app.get("/health", (req, res) => {
   });
 });
 
-/* REGISTER */
 app.post("/api/auth/register", async (req, res) => {
   try {
     const name = String(req.body.name || "").trim();
@@ -540,9 +584,9 @@ app.post("/api/auth/register", async (req, res) => {
     }
 
     if (password.length < 8) {
-      return res
-        .status(400)
-        .json({ message: "La password deve avere almeno 8 caratteri." });
+      return res.status(400).json({
+        message: "La password deve avere almeno 8 caratteri.",
+      });
     }
 
     const hash = await bcrypt.hash(password, 10);
@@ -567,7 +611,6 @@ app.post("/api/auth/register", async (req, res) => {
   }
 });
 
-/* LOGIN */
 app.post("/api/auth/login", async (req, res) => {
   try {
     const email = String(req.body.email || "").trim().toLowerCase();
@@ -606,12 +649,10 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-/* ME */
 app.get("/api/me", auth, async (req, res) => {
   res.json({ user: req.user });
 });
 
-/* CONVERSATIONS */
 app.get("/api/conversations", auth, async (req, res) => {
   const { rows } = await pool.query(
     `SELECT id,title,created_at,updated_at
@@ -660,7 +701,6 @@ app.get("/api/conversations/:id/messages", auth, async (req, res) => {
   res.json({ messages: rows });
 });
 
-/* CHAT */
 app.post("/api/chat", auth, async (req, res) => {
   try {
     const message = String(req.body.message || "").trim();
@@ -720,8 +760,8 @@ app.post("/api/chat", auth, async (req, res) => {
 
     const completion = await anthropic.messages.create({
       model: ANTHROPIC_MODEL,
-      max_tokens: artifactExpected ? 5000 : 2800,
-      temperature: mode === "landing" ? 0.32 : 0.45,
+      max_tokens: artifactExpected ? 8000 : 3000,
+      temperature: mode === "landing" ? 0.25 : 0.45,
       system: systemPrompt,
       messages: history,
     });
@@ -734,8 +774,11 @@ app.post("/api/chat", auth, async (req, res) => {
 
     const artifact = extractArtifact(reply);
 
-    if (artifact) {
-      reply = stripCodeBlock(reply);
+    reply = stripCodeBlock(reply, artifact);
+
+    if (artifactExpected && !artifact) {
+      reply =
+        "Nexus ha generato una struttura, ma il file non è risultato completo. Riprova chiedendo: “genera solo il file HTML completo scaricabile”.";
     }
 
     const cost = artifactExpected ? 8 : 3;
@@ -787,7 +830,6 @@ app.post("/api/chat", auth, async (req, res) => {
   }
 });
 
-/* START */
 initDb()
   .then(() => {
     app.listen(PORT, () => {
