@@ -1,0 +1,10 @@
+import pg from 'pg';
+import dotenv from 'dotenv';
+dotenv.config();
+const { Pool } = pg;
+if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL missing');
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized:false } : false });
+await pool.query('CREATE EXTENSION IF NOT EXISTS "pgcrypto";');
+await pool.query('DROP TABLE IF EXISTS messages CASCADE; DROP TABLE IF EXISTS conversations CASCADE; DROP TABLE IF EXISTS verification_codes CASCADE; DROP TABLE IF EXISTS users CASCADE;');
+console.log('DB reset ok');
+await pool.end();
