@@ -275,6 +275,14 @@ PROCESSO INTERNO DA SEGUIRE PRIMA DI RISPONDERE:
 - verifica che il brand sia corretto
 
 Non spiegare questo processo all'utente. Produci direttamente.
+
+REGOLA CRITICA FILE:
+Quando generi HTML, non devi spiegare il codice.
+Devi produrre un file completo e chiuso correttamente.
+Il file deve iniziare con <!doctype html> e terminare con </html>.
+Non interrompere il codice.
+Non lasciare CSS, sezioni o tag incompleti.
+Non usare markdown fuori dal blocco HTML.
 `;
 
   const modes = {
